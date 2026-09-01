@@ -10,6 +10,7 @@ SAMPLE = {
     "overall_status": "ok",
     "host": {"hostname": "ubuntu-n5105", "os": "Ubuntu 24.04.2 LTS", "uptime_seconds": 3600},
     "cpu": {"usage_percent": 25.0, "status": "ok", "load": {"1m": 0.1, "5m": 0.2, "15m": 0.3}, "frequency_mhz": 1800, "logical_cpus": 4},
+    "power": {"package_watts": 5.8, "sample_seconds": 5.0, "status": "ok", "estimated": True},
     "temperatures": [],
     "memory": {"total_bytes": 16000, "used_bytes": 4000, "usage_percent": 25.0, "status": "ok"},
     "swap": {"total_bytes": 4000, "used_bytes": 0, "usage_percent": 0.0, "status": "ok"},
@@ -31,7 +32,12 @@ def test_dashboard_route_returns_html():
     assert "N5105 Dashboard" in response.text
     for element_id in ("summary", "cpu", "temperatures", "memory", "disk", "services", "connection", "updated"):
         assert f'id="{element_id}"' in response.text
-    assert "setInterval(refresh, 10000)" in response.text
+    assert "setInterval(refresh, 5000)" in response.text
+    assert "setInterval(refresh, 10000)" not in response.text
+    assert "5秒后重试" in response.text
+    assert "10秒后重试" not in response.text
+    assert 'metric("CPU Package 功耗"' in response.text
+    assert "秒平均·估算" in response.text
     assert 'fetch("/api/status", {cache: "no-store"})' in response.text
     assert "previousData" in response.text
     assert "textContent" in response.text

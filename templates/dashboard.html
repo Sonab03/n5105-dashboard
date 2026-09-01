@@ -99,7 +99,7 @@
     function render(data) {
       if (!data || typeof data !== "object" || !data.host || !data.cpu) throw new Error("invalid status payload");
       previousData = data;
-      const host = data.host || {}, cpu = data.cpu || {}, memory = data.memory || {}, swap = data.swap || {}, disk = data.disk || {};
+      const host = data.host || {}, cpu = data.cpu || {}, power = data.power || {}, memory = data.memory || {}, swap = data.swap || {}, disk = data.disk || {};
       const temperatures = Array.isArray(data.temperatures) ? data.temperatures : [], services = Array.isArray(data.services) ? data.services : [], errors = Array.isArray(data.errors) ? data.errors : [];
       byId("summary").textContent = `${available(host.hostname)} · ${available(host.os)} · 已运行 ${uptime(host.uptime_seconds)}`;
       byId("updated").textContent = `更新：${new Date(data.collected_at).toLocaleString()}`;
@@ -107,6 +107,9 @@
       renderConnection(data.overall_status);
       const cpuCard = byId("cpu"); removeChildren(cpuCard); addUsage(cpuCard, "使用率", cpu);
       const load = cpu.load; cpuCard.append(metric("负载 1/5/15m", load ? `${available(load["1m"])} / ${available(load["5m"])} / ${available(load["15m"])}` : "不可用")); cpuCard.append(metric("频率", value(cpu.frequency_mhz, " MHz"))); cpuCard.append(metric("逻辑核心", available(cpu.logical_cpus)));
+      const watts = Number(power.package_watts), sampleSeconds = Number(power.sample_seconds), powerOk = power.status === "ok" && Number.isFinite(watts) && watts >= 0 && Number.isFinite(sampleSeconds) && sampleSeconds > 0;
+      const powerText = powerOk ? `${watts.toFixed(1)} W（${sampleSeconds.toFixed(1).replace(/\.0$/, "")}秒平均·估算）` : "不可用";
+      cpuCard.append(metric("CPU Package 功耗", powerText, powerOk ? "ok" : "unavailable"));
       const temperatureCard = byId("temperatures"); removeChildren(temperatureCard);
       if (temperatures.length) temperatures.forEach(item => temperatureCard.append(metric(available(item.name), value(item.celsius, "°C"), item.status))); else temperatureCard.append(metric("传感器", "不可用", "unavailable"));
       const memoryCard = byId("memory"); removeChildren(memoryCard); memoryCard.append(metric("内存", `${bytes(memory.used_bytes)} / ${bytes(memory.total_bytes)}`, memory.status)); addUsage(memoryCard, "内存使用率", memory); memoryCard.append(metric("Swap", `${bytes(swap.used_bytes)} / ${bytes(swap.total_bytes)}`, swap.status)); addUsage(memoryCard, "Swap 使用率", swap);
@@ -120,12 +123,12 @@
         if (!response.ok) throw new Error("status request failed"); render(await response.json());
       } catch (error) {
         const connection = byId("connection"); connection.className = "badge failed"; connection.lastElementChild.textContent = "连接中断";
-        byId("updated").textContent = `刷新失败：${new Date().toLocaleString()} · 10秒后重试`;
+        byId("updated").textContent = `刷新失败：${new Date().toLocaleString()} · 5秒后重试`;
         if (!previousData) byId("summary").textContent = "暂时无法读取主机状态";
       }
     }
     refresh();
-    setInterval(refresh, 10000);
+    setInterval(refresh, 5000);
   </script>
 </body>
 </html>

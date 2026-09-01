@@ -1,7 +1,7 @@
 [Unit]
 Description=N5105 Read-Only Status Dashboard
-After=network-online.target
-Wants=network-online.target
+After=network-online.target n5105-power-sampler.service
+Wants=network-online.target n5105-power-sampler.service
 
 [Service]
 Type=simple
