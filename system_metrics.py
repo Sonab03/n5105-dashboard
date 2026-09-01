@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 import re
 import socket
 import subprocess
@@ -135,7 +136,7 @@ def read_os_name(path: Path) -> str:
         for line in path.read_text(encoding="utf-8").splitlines():
             if line.startswith("PRETTY_NAME="):
                 return line.split("=", 1)[1].strip().strip('"')
-    except OSError:
+    except (OSError, UnicodeError):
         pass
     return "Unavailable"
 
@@ -149,6 +150,17 @@ def overall_status(items: list[dict], errors: list[str]) -> str:
     return "ok"
 
 
+def finite_float(value) -> float:
+    number = float(value)
+    if not math.isfinite(number):
+        raise ValueError("non-finite metric")
+    return number
+
+
+def finite_int(value) -> int:
+    return int(finite_float(value))
+
+
 def collect_status(
     *,
     psutil_module=psutil,
@@ -159,29 +171,38 @@ def collect_status(
     now: datetime | None = None,
     hostname: str | None = None,
 ) -> dict:
-    collected_at = now or datetime.now(JST)
+    if now is None:
+        collected_at = datetime.now(JST)
+    elif now.tzinfo is None:
+        collected_at = now.replace(tzinfo=JST)
+    else:
+        collected_at = now.astimezone(JST)
     errors: list[str] = []
 
     try:
-        cpu_usage = round(float(psutil_module.cpu_percent(interval=0.1)), 1)
+        cpu_usage = round(finite_float(psutil_module.cpu_percent(interval=0.1)), 1)
         load_1, load_5, load_15 = psutil_module.getloadavg()
         frequency = psutil_module.cpu_freq()
         cpu = {
             "usage_percent": cpu_usage,
             "status": classify(cpu_usage, CPU_WARNING, CPU_CRITICAL),
-            "load": {"1m": round(load_1, 2), "5m": round(load_5, 2), "15m": round(load_15, 2)},
-            "frequency_mhz": round(float(frequency.current), 0) if frequency else None,
-            "logical_cpus": psutil_module.cpu_count(logical=True),
+            "load": {
+                "1m": round(finite_float(load_1), 2),
+                "5m": round(finite_float(load_5), 2),
+                "15m": round(finite_float(load_15), 2),
+            },
+            "frequency_mhz": round(finite_float(frequency.current), 0) if frequency else None,
+            "logical_cpus": finite_int(psutil_module.cpu_count(logical=True)),
         }
     except (AttributeError, OSError, TypeError, ValueError):
         cpu = {"usage_percent": None, "status": "unavailable", "load": None, "frequency_mhz": None, "logical_cpus": None}
         errors.append("CPU metrics unavailable")
 
     def usage_payload(values, warning, critical):
-        percent = round(float(values.percent), 1)
+        percent = round(finite_float(values.percent), 1)
         return {
-            "total_bytes": int(values.total),
-            "used_bytes": int(values.used),
+            "total_bytes": finite_int(values.total),
+            "used_bytes": finite_int(values.used),
             "usage_percent": percent,
             "status": classify(percent, warning, critical),
         }
@@ -195,9 +216,9 @@ def collect_status(
     try:
         swap_values = psutil_module.swap_memory()
         swap = {
-            "total_bytes": int(swap_values.total),
-            "used_bytes": int(swap_values.used),
-            "usage_percent": round(float(swap_values.percent), 1),
+            "total_bytes": finite_int(swap_values.total),
+            "used_bytes": finite_int(swap_values.used),
+            "usage_percent": round(finite_float(swap_values.percent), 1),
             "status": "ok",
         }
     except (AttributeError, OSError, TypeError, ValueError):
@@ -211,7 +232,7 @@ def collect_status(
         errors.append("disk metrics unavailable")
 
     try:
-        uptime_seconds = max(0, int(collected_at.timestamp() - psutil_module.boot_time()))
+        uptime_seconds = max(0, int(collected_at.timestamp() - finite_float(psutil_module.boot_time())))
     except (AttributeError, OSError, TypeError, ValueError):
         uptime_seconds = None
         errors.append("uptime unavailable")
@@ -221,19 +242,26 @@ def collect_status(
     services, service_errors = collect_services(targets, runner=runner)
     errors.extend(temperature_errors + config_errors + service_errors)
 
+    os_name = read_os_name(os_release_path)
+    if os_name == "Unavailable":
+        errors.append("host OS unavailable")
+
     core_items = [cpu, memory, disk]
     health_items = [*core_items, *temperatures, *services]
     health = (
         "critical"
         if all(item["status"] == "unavailable" for item in core_items)
-        else overall_status(health_items, errors)
+        else overall_status(
+            health_items,
+            [error for error in errors if error != "swap metrics unavailable"],
+        )
     )
     return {
         "collected_at": collected_at.isoformat(timespec="seconds"),
         "overall_status": health,
         "host": {
             "hostname": hostname or socket.gethostname(),
-            "os": read_os_name(os_release_path),
+            "os": os_name,
             "uptime_seconds": uptime_seconds,
         },
         "cpu": cpu,

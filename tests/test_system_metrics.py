@@ -1,8 +1,9 @@
-from datetime import datetime
+from datetime import datetime, timezone
+import json
+import math
 from pathlib import Path
 from types import SimpleNamespace
 from zoneinfo import ZoneInfo
-import json
 import subprocess
 
 from system_metrics import (
@@ -161,6 +162,23 @@ def test_collect_status_assembles_stable_public_shape(tmp_path):
         hostname="ubuntu-n5105",
     )
 
+    assert set(payload) == {
+        "collected_at", "overall_status", "host", "cpu", "temperatures",
+        "memory", "swap", "disk", "services", "errors",
+    }
+    assert set(payload["host"]) == {"hostname", "os", "uptime_seconds"}
+    assert set(payload["cpu"]) == {
+        "usage_percent", "status", "load", "frequency_mhz", "logical_cpus",
+    }
+    assert set(payload["memory"]) == {
+        "total_bytes", "used_bytes", "usage_percent", "status",
+    }
+    assert set(payload["swap"]) == {
+        "total_bytes", "used_bytes", "usage_percent", "status",
+    }
+    assert set(payload["disk"]) == {
+        "total_bytes", "used_bytes", "usage_percent", "status",
+    }
     assert payload["collected_at"] == "2026-09-01T00:00:00+09:00"
     assert payload["overall_status"] == "ok"
     assert payload["host"]["hostname"] == "ubuntu-n5105"
@@ -191,6 +209,17 @@ def status_with(psutil_module, tmp_path):
         now=datetime(2026, 9, 1, 0, 0, tzinfo=ZoneInfo("Asia/Tokyo")),
         hostname="ubuntu-n5105",
     )
+
+
+def assert_only_finite_floats(value):
+    if isinstance(value, dict):
+        for nested in value.values():
+            assert_only_finite_floats(nested)
+    elif isinstance(value, list):
+        for nested in value:
+            assert_only_finite_floats(nested)
+    elif isinstance(value, float):
+        assert math.isfinite(value)
 
 
 def test_collect_status_keeps_other_metrics_when_memory_fails(tmp_path):
@@ -228,3 +257,93 @@ def test_collect_status_is_critical_when_all_core_collectors_fail(tmp_path):
     assert payload["disk"]["status"] == "unavailable"
     assert payload["overall_status"] == "critical"
     assert all("private" not in error for error in payload["errors"])
+
+
+def test_collect_status_keeps_overall_ok_when_only_swap_fails(tmp_path):
+    class SwapFailingPsutil(FakePsutil):
+        @staticmethod
+        def swap_memory():
+            raise OSError("private swap detail")
+
+    payload = status_with(SwapFailingPsutil, tmp_path)
+
+    assert payload["swap"] == {
+        "total_bytes": None,
+        "used_bytes": None,
+        "usage_percent": None,
+        "status": "unavailable",
+    }
+    assert payload["overall_status"] == "ok"
+    assert payload["errors"] == ["swap metrics unavailable"]
+
+
+def test_collect_status_sanitizes_non_finite_psutil_metrics_for_strict_json(tmp_path):
+    class NonFinitePsutil(FakePsutil):
+        @staticmethod
+        def cpu_percent(interval):
+            return float("nan")
+
+        @staticmethod
+        def virtual_memory():
+            return SimpleNamespace(total=16_000, used=4_000, percent=float("inf"))
+
+        @staticmethod
+        def swap_memory():
+            return SimpleNamespace(total=4_000, used=0, percent=float("nan"))
+
+        @staticmethod
+        def disk_usage(path):
+            return SimpleNamespace(total=100_000, used=20_000, percent=float("-inf"))
+
+    payload = status_with(NonFinitePsutil, tmp_path)
+
+    assert payload["cpu"]["status"] == "unavailable"
+    assert payload["memory"]["status"] == "unavailable"
+    assert payload["swap"]["status"] == "unavailable"
+    assert payload["disk"]["status"] == "unavailable"
+    assert_only_finite_floats(payload)
+    json.dumps(payload, allow_nan=False)
+    assert all("private" not in error for error in payload["errors"])
+
+
+def test_collect_status_isolates_invalid_os_release_encoding(tmp_path):
+    os_release = tmp_path / "os-release"
+    os_release.write_bytes(b"PRETTY_NAME=\xff")
+    services = tmp_path / "services.json"
+    services.write_text("[]", encoding="utf-8")
+
+    payload = collect_status(
+        psutil_module=FakePsutil,
+        hwmon_root=tmp_path / "empty-hwmon",
+        os_release_path=os_release,
+        service_config_path=services,
+        now=datetime(2026, 9, 1, 0, 0, tzinfo=ZoneInfo("Asia/Tokyo")),
+        hostname="ubuntu-n5105",
+    )
+
+    assert payload["host"] == {
+        "hostname": "ubuntu-n5105",
+        "os": "Unavailable",
+        "uptime_seconds": 88_188_400,
+    }
+    assert payload["cpu"]["usage_percent"] == 25.0
+    assert payload["overall_status"] == "warning"
+    assert payload["errors"] == ["host OS unavailable"]
+
+
+def test_collect_status_normalizes_injected_utc_timestamp_to_jst(tmp_path):
+    os_release = tmp_path / "os-release"
+    os_release.write_text('PRETTY_NAME="Ubuntu 24.04.2 LTS"\n', encoding="utf-8")
+    services = tmp_path / "services.json"
+    services.write_text("[]", encoding="utf-8")
+
+    payload = collect_status(
+        psutil_module=FakePsutil,
+        hwmon_root=tmp_path / "empty-hwmon",
+        os_release_path=os_release,
+        service_config_path=services,
+        now=datetime(2026, 8, 31, 15, 0, tzinfo=timezone.utc),
+        hostname="ubuntu-n5105",
+    )
+
+    assert payload["collected_at"] == "2026-09-01T00:00:00+09:00"
