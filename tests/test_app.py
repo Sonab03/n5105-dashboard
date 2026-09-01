@@ -34,6 +34,19 @@ def test_dashboard_route_returns_html():
     assert "textContent" in response.text
     assert "innerHTML" not in response.text
     assert 'aria-live="polite"' in response.text
+    for status, color in (
+        ("ok", "var(--ok)"),
+        ("warning", "var(--warning)"),
+        ("critical", "var(--critical)"),
+        ("unavailable", "var(--unavailable)"),
+    ):
+        assert f".value.{status} {{ color:{color}; }}" in response.text
+        assert f".badge.{status} {{ color:{color};" in response.text
+    assert "function statusBadge(state, status)" in response.text
+    assert "statusBadge(available(item.state), status)" in response.text
+    assert "temperatureCard.append(metric(available(item.name), value(item.celsius, \"°C\"), item.status))" in response.text
+    assert "function serviceStatus(status, state)" in response.text
+    assert 'serviceStatus(item.status, item.state)' in response.text
 
 
 def test_status_route_returns_provider_payload_without_cache():

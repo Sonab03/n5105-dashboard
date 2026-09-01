@@ -19,7 +19,9 @@
     .metric { display:flex; justify-content:space-between; gap:16px; padding:9px 0; border-top:1px solid rgba(38,48,66,.65); }
     .metric:first-child { border-top:0; }
     .value { color:var(--text); font-variant-numeric:tabular-nums; text-align:right; }
+    .value.ok { color:var(--ok); } .value.warning { color:var(--warning); } .value.critical { color:var(--critical); } .value.unavailable { color:var(--unavailable); }
     .badge { display:inline-flex; align-items:center; gap:7px; padding:6px 10px; border-radius:999px; background:#1a2330; color:var(--muted); font-size:13px; }
+    .badge.ok { color:var(--ok); border:1px solid rgba(53,208,127,.35); } .badge.warning { color:var(--warning); border:1px solid rgba(243,189,67,.35); } .badge.critical { color:var(--critical); border:1px solid rgba(255,93,104,.35); } .badge.unavailable { color:var(--unavailable); border:1px solid rgba(119,131,152,.35); }
     .dot { width:8px; height:8px; border-radius:50%; background:var(--unavailable); }
     .ok .dot,.dot.ok { background:var(--ok); } .warning .dot,.dot.warning { background:var(--warning); } .critical .dot,.dot.critical { background:var(--critical); }
     .bar { height:8px; margin-top:10px; overflow:hidden; border-radius:999px; background:#202a39; }
@@ -56,6 +58,12 @@
     const byId = id => document.getElementById(id);
     const statuses = new Set(["ok", "warning", "critical", "unavailable"]);
     const safeStatus = status => statuses.has(status) ? status : "unavailable";
+    function serviceStatus(status, state) {
+      if (statuses.has(status)) return status;
+      if (state === "active") return "ok";
+      if (state === "inactive" || state === "failed") return "critical";
+      return "unavailable";
+    }
     const available = item => item === null || item === undefined ? "不可用" : String(item);
     const value = (number, suffix = "") => number === null || number === undefined ? "不可用" : `${number}${suffix}`;
     const bytes = number => number === null || number === undefined || !Number.isFinite(Number(number)) ? "不可用" : `${(Number(number) / 1073741824).toFixed(1)} GiB`;
@@ -65,8 +73,15 @@
     function metric(label, content, status) {
       const row = document.createElement("div"); row.className = "metric";
       const name = document.createElement("span"); name.textContent = label;
-      const display = document.createElement("span"); display.className = `value ${safeStatus(status)}`; display.textContent = content;
+      const display = document.createElement("span"); display.className = `value ${safeStatus(status)}`;
+      if (content instanceof Node) display.append(content); else display.textContent = content;
       row.append(name, display); return row;
+    }
+    function statusBadge(state, status) {
+      const badge = document.createElement("span"); badge.className = `badge ${safeStatus(status)}`;
+      const dot = document.createElement("span"); dot.className = "dot";
+      const label = document.createElement("span"); label.textContent = state;
+      badge.append(dot, label); return badge;
     }
     function usageBar(percent, status) {
       const bar = document.createElement("div"); bar.className = "bar";
@@ -97,7 +112,7 @@
       const memoryCard = byId("memory"); removeChildren(memoryCard); memoryCard.append(metric("内存", `${bytes(memory.used_bytes)} / ${bytes(memory.total_bytes)}`, memory.status)); addUsage(memoryCard, "内存使用率", memory); memoryCard.append(metric("Swap", `${bytes(swap.used_bytes)} / ${bytes(swap.total_bytes)}`, swap.status)); addUsage(memoryCard, "Swap 使用率", swap);
       const diskCard = byId("disk"); removeChildren(diskCard); diskCard.append(metric("根分区", `${bytes(disk.used_bytes)} / ${bytes(disk.total_bytes)}`, disk.status)); addUsage(diskCard, "使用率", disk);
       const serviceCard = byId("services"); removeChildren(serviceCard);
-      if (services.length) services.forEach(item => serviceCard.append(metric(available(item.name), available(item.state), item.status))); else serviceCard.append(metric("服务", "未配置", "unavailable"));
+      if (services.length) services.forEach(item => { const status = serviceStatus(item.status, item.state); serviceCard.append(metric(available(item.name), statusBadge(available(item.state), status), status)); }); else serviceCard.append(metric("服务", "未配置", "unavailable"));
     }
     async function refresh() {
       try {
