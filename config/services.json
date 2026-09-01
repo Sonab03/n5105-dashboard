@@ -1,0 +1,10 @@
+[
+  {
+    "name": "UnionPay Rate",
+    "unit": "unionpay-rate.service"
+  },
+  {
+    "name": "Cloudflare Tunnel",
+    "unit": "cloudflared.service"
+  }
+]

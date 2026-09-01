@@ -1,6 +1,8 @@
 from pathlib import Path
+import json
+import subprocess
 
-from system_metrics import classify, collect_temperatures
+from system_metrics import classify, collect_temperatures, collect_services, load_service_config
 
 
 def write_sensor(root: Path, hwmon: str, chip: str, index: int, label: str, value: int):
@@ -43,3 +45,39 @@ def test_collect_temperatures_reports_bad_sensor_without_leaking_path(tmp_path):
     ]
     assert errors == ["temperature sensor unavailable: CPU Package"]
     assert str(tmp_path) not in errors[0]
+
+
+def test_load_service_config_accepts_service_units_and_rejects_unsafe_values(tmp_path):
+    config = tmp_path / "services.json"
+    config.write_text(json.dumps([
+        {"name": "Rate", "unit": "unionpay-rate.service"},
+        {"name": "Unsafe", "unit": "x.service;reboot"},
+    ]), encoding="utf-8")
+    targets, errors = load_service_config(config)
+    assert targets == [{"name": "Rate", "unit": "unionpay-rate.service"}]
+    assert errors == ["invalid service configuration entry: Unsafe"]
+
+
+def test_collect_services_uses_argument_list_and_marks_inactive_critical():
+    calls = []
+    def runner(args, **kwargs):
+        calls.append((args, kwargs))
+        return subprocess.CompletedProcess(args, 3, stdout="inactive\n", stderr="")
+    services, errors = collect_services(
+        [{"name": "Rate", "unit": "unionpay-rate.service"}], runner=runner
+    )
+    assert calls[0][0] == ["systemctl", "is-active", "--", "unionpay-rate.service"]
+    assert calls[0][1]["shell"] is False
+    assert services == [{"name": "Rate", "unit": "unionpay-rate.service", "state": "inactive", "status": "critical"}]
+    assert errors == []
+
+
+def test_collect_services_sanitizes_query_failure():
+    def runner(args, **kwargs):
+        raise OSError("private local detail")
+    services, errors = collect_services(
+        [{"name": "Rate", "unit": "unionpay-rate.service"}], runner=runner
+    )
+    assert services[0]["state"] == "unknown"
+    assert services[0]["status"] == "unavailable"
+    assert errors == ["service state unavailable: Rate"]
