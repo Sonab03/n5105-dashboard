@@ -20,49 +20,72 @@ control the configured units.
 ## Deployment checks
 
 ```bash
+systemctl status n5105-power-sampler --no-pager
 systemctl status n5105-dashboard --no-pager
+sudo -u ubuntu python3 -m json.tool /run/n5105-dashboard/power.json
+stat -c '%U:%G %a %n' /run/n5105-dashboard/power.json
 curl --fail http://127.0.0.1:8001/healthz
+curl --fail http://127.0.0.1:8001/api/status
 ss -ltnp 'sport = :8001'
 ```
 
 ## Install and operate the systemd service
 
-Validate the checked-in unit before the initial installation:
+The root sampler must run only from its root-owned installed copy. Validate both
+units, install the sampler and units, then start the sampler before restarting
+the unprivileged dashboard:
 
 ```bash
-systemd-analyze verify deploy/n5105-dashboard.service
+sudo install -d -o root -g root -m 0755 /usr/local/libexec
+sudo install -o root -g root -m 0755 power_sampler.py /usr/local/libexec/n5105-power-sampler
+systemd-analyze verify deploy/n5105-power-sampler.service deploy/n5105-dashboard.service
+sudo install -o root -g root -m 0644 deploy/n5105-power-sampler.service /etc/systemd/system/n5105-power-sampler.service
 sudo install -o root -g root -m 0644 deploy/n5105-dashboard.service /etc/systemd/system/n5105-dashboard.service
-sudo systemd-analyze verify /etc/systemd/system/n5105-dashboard.service
+sudo systemd-analyze verify /etc/systemd/system/n5105-power-sampler.service /etc/systemd/system/n5105-dashboard.service
 sudo systemctl daemon-reload
-sudo systemctl enable --now n5105-dashboard.service
-sudo systemctl status n5105-dashboard.service --no-pager
-curl --fail http://127.0.0.1:8001/healthz
-sudo journalctl -u n5105-dashboard.service -n 100 --no-pager
-```
-
-For every update, back up the installed unit **before** replacing it. Then
-install, validate, reload, restart, and test the dashboard in that order:
-
-```bash
-sudo test -f /etc/systemd/system/n5105-dashboard.service
-sudo cp -a /etc/systemd/system/n5105-dashboard.service /etc/systemd/system/n5105-dashboard.service.pre-update
-sudo install -o root -g root -m 0644 deploy/n5105-dashboard.service /etc/systemd/system/n5105-dashboard.service
-sudo systemd-analyze verify /etc/systemd/system/n5105-dashboard.service
-sudo systemctl daemon-reload
+sudo systemctl enable --now n5105-power-sampler.service
 sudo systemctl restart n5105-dashboard.service
-systemctl is-active n5105-dashboard.service
+systemctl is-active n5105-power-sampler.service n5105-dashboard.service
+sudo -u ubuntu python3 -m json.tool /run/n5105-dashboard/power.json
+stat -c '%U:%G %a %n' /run/n5105-dashboard/power.json
+curl --fail http://127.0.0.1:8001/healthz
+curl --fail http://127.0.0.1:8001/api/status
+```
+
+Before every update, back up the installed sampler and units. Install, validate,
+reload, restart, and test in that order:
+
+```bash
+sudo test -f /usr/local/libexec/n5105-power-sampler
+sudo test -f /etc/systemd/system/n5105-power-sampler.service
+sudo test -f /etc/systemd/system/n5105-dashboard.service
+sudo cp -a /usr/local/libexec/n5105-power-sampler /usr/local/libexec/n5105-power-sampler.pre-update
+sudo cp -a /etc/systemd/system/n5105-power-sampler.service /etc/systemd/system/n5105-power-sampler.service.pre-update
+sudo cp -a /etc/systemd/system/n5105-dashboard.service /etc/systemd/system/n5105-dashboard.service.pre-update
+sudo install -o root -g root -m 0755 power_sampler.py /usr/local/libexec/n5105-power-sampler
+sudo install -o root -g root -m 0644 deploy/n5105-power-sampler.service /etc/systemd/system/n5105-power-sampler.service
+sudo install -o root -g root -m 0644 deploy/n5105-dashboard.service /etc/systemd/system/n5105-dashboard.service
+sudo systemd-analyze verify /etc/systemd/system/n5105-power-sampler.service /etc/systemd/system/n5105-dashboard.service
+sudo systemctl daemon-reload
+sudo systemctl restart n5105-power-sampler.service
+sudo systemctl restart n5105-dashboard.service
+systemctl is-active n5105-power-sampler.service n5105-dashboard.service
+sudo -u ubuntu python3 -m json.tool /run/n5105-dashboard/power.json
 curl --fail http://127.0.0.1:8001/healthz
 ```
 
-If unit validation, restart, or the health check fails, do not continue with
-Tunnel changes. Restore the pre-update unit and verify the restored service:
+If validation, restart, or the health check fails, restore the dashboard first,
+then restore the sampler. This feature requires no Tunnel or Access changes:
 
 ```bash
 sudo cp -a /etc/systemd/system/n5105-dashboard.service.pre-update /etc/systemd/system/n5105-dashboard.service
-sudo systemd-analyze verify /etc/systemd/system/n5105-dashboard.service
+sudo cp -a /usr/local/libexec/n5105-power-sampler.pre-update /usr/local/libexec/n5105-power-sampler
+sudo cp -a /etc/systemd/system/n5105-power-sampler.service.pre-update /etc/systemd/system/n5105-power-sampler.service
+sudo systemd-analyze verify /etc/systemd/system/n5105-power-sampler.service /etc/systemd/system/n5105-dashboard.service
 sudo systemctl daemon-reload
 sudo systemctl restart n5105-dashboard.service
-systemctl is-active n5105-dashboard.service
+sudo systemctl restart n5105-power-sampler.service
+systemctl is-active n5105-dashboard.service n5105-power-sampler.service
 curl --fail http://127.0.0.1:8001/healthz
 ```
 
