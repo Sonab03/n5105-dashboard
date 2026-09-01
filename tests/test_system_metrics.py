@@ -57,6 +57,23 @@ def test_collect_temperatures_reports_bad_sensor_without_leaking_path(tmp_path):
     assert str(tmp_path) not in errors[0]
 
 
+def test_collect_temperatures_sanitizes_nan_and_infinite_recognized_sensors(tmp_path):
+    write_sensor(tmp_path, "hwmon0", "coretemp", 1, "Package id 0", "nan")
+    write_sensor(tmp_path, "hwmon1", "nvme", 1, "Composite", "inf")
+
+    temperatures, errors = collect_temperatures(tmp_path)
+
+    assert temperatures == [
+        {"name": "CPU Package", "celsius": None, "status": "unavailable"},
+        {"name": "NVMe", "celsius": None, "status": "unavailable"},
+    ]
+    assert errors == [
+        "temperature sensor unavailable: CPU Package",
+        "temperature sensor unavailable: NVMe",
+    ]
+    assert str(tmp_path) not in " ".join(errors)
+
+
 def test_load_service_config_accepts_service_units_and_rejects_unsafe_values(tmp_path):
     config = tmp_path / "services.json"
     config.write_text(json.dumps([
@@ -234,6 +251,29 @@ def test_collect_status_keeps_other_metrics_when_memory_fails(tmp_path):
     assert payload["cpu"]["usage_percent"] == 25.0
     assert payload["overall_status"] == "warning"
     assert payload["errors"] == ["memory metrics unavailable"]
+
+
+def test_collect_status_strictly_encodes_non_finite_temperature_as_unavailable(tmp_path):
+    write_sensor(tmp_path, "hwmon0", "coretemp", 1, "Package id 0", "nan")
+    os_release = tmp_path / "os-release"
+    os_release.write_text('PRETTY_NAME="Ubuntu 24.04.2 LTS"\n', encoding="utf-8")
+    services = tmp_path / "services.json"
+    services.write_text("[]", encoding="utf-8")
+
+    payload = collect_status(
+        psutil_module=FakePsutil,
+        hwmon_root=tmp_path,
+        os_release_path=os_release,
+        service_config_path=services,
+        now=datetime(2026, 9, 1, 0, 0, tzinfo=ZoneInfo("Asia/Tokyo")),
+        hostname="ubuntu-n5105",
+    )
+
+    assert payload["temperatures"] == [
+        {"name": "CPU Package", "celsius": None, "status": "unavailable"}
+    ]
+    assert payload["errors"] == ["temperature sensor unavailable: CPU Package"]
+    json.dumps(payload, allow_nan=False)
 
 
 def test_collect_status_is_critical_when_all_core_collectors_fail(tmp_path):

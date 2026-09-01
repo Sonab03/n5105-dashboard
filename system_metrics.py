@@ -72,7 +72,7 @@ def collect_temperatures(
                 continue
 
             try:
-                celsius = round(float(input_path.read_text(encoding="utf-8").strip()) / 1000, 1)
+                celsius = round(finite_float(input_path.read_text(encoding="utf-8").strip()) / 1000, 1)
                 status = classify(celsius, warning, critical)
             except (OSError, ValueError):
                 celsius = None
