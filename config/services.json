@@ -1,10 +1,6 @@
 [
-  {
-    "name": "UnionPay Rate",
-    "unit": "unionpay-rate.service"
-  },
-  {
-    "name": "Cloudflare Tunnel",
-    "unit": "cloudflared.service"
-  }
+  {"name": "Sonab Home", "unit": "sonab-home.service"},
+  {"name": "UnionPay Rate", "unit": "unionpay-rate.service"},
+  {"name": "N5105 Dashboard", "unit": "n5105-dashboard.service"},
+  {"name": "Cloudflare Tunnel", "unit": "cloudflared.service"}
 ]
