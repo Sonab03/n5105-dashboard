@@ -17,3 +17,11 @@ The requested command without `PYTHONPATH=.` could not import the project module
 ## Totals, deviations, concerns
 
 Six tests passed in the full suite. No functional deviations from the brief. Service units are regex-validated and passed to subprocess as an argument list with `shell=False`; raw subprocess errors are not exposed. Runtime target Python 3.12.3 was not available in this local environment (tests ran under Python 3.8.2).
+
+## Review fixes
+
+- RED: `PYTHONPATH=. .venv/bin/pytest tests/test_system_metrics.py -k 'service or utf8' -v` — invalid UTF-8 raised `UnicodeDecodeError`, and multiline stdout was returned verbatim.
+- GREEN focused: same command after fixes — 5 passed, 3 deselected.
+- GREEN full: `PYTHONPATH=. .venv/bin/pytest -q` — 8 passed.
+
+Config loading now catches Unicode decoding errors. Service output is restricted to the explicit allowlist (`active`, `inactive`, `failed`, `activating`, `deactivating`, `unknown`); unexpected output becomes `unknown` with a sanitized unavailable error.

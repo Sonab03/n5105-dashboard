@@ -18,6 +18,7 @@ MEMORY_CRITICAL = 90.0
 DISK_WARNING = 80.0
 DISK_CRITICAL = 90.0
 SERVICE_UNIT_PATTERN = re.compile(r"^[A-Za-z0-9_.@:-]+\.service$")
+SERVICE_STATES = {"active", "inactive", "failed", "activating", "deactivating", "unknown"}
 
 
 def classify(value: float, warning: float, critical: float) -> str:
@@ -81,7 +82,7 @@ def collect_temperatures(
 def load_service_config(path: Path) -> tuple[list[dict], list[str]]:
     try:
         raw = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError, TypeError):
+    except (OSError, UnicodeError, json.JSONDecodeError, TypeError):
         return [], ["service configuration unavailable"]
     if not isinstance(raw, list):
         return [], ["service configuration unavailable"]
@@ -111,7 +112,11 @@ def collect_services(
                 capture_output=True, text=True, timeout=2, shell=False, check=False,
             )
             state = result.stdout.strip() or "unknown"
-            status = "ok" if state == "active" else "critical"
+            if state not in SERVICE_STATES:
+                state, status = "unknown", "unavailable"
+                errors.append(f"service state unavailable: {target['name']}")
+            else:
+                status = "ok" if state == "active" else "critical"
         except (OSError, subprocess.SubprocessError):
             state, status = "unknown", "unavailable"
             errors.append(f"service state unavailable: {target['name']}")

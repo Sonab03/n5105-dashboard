@@ -81,3 +81,19 @@ def test_collect_services_sanitizes_query_failure():
     assert services[0]["state"] == "unknown"
     assert services[0]["status"] == "unavailable"
     assert errors == ["service state unavailable: Rate"]
+
+
+def test_load_service_config_rejects_invalid_utf8(tmp_path):
+    config = tmp_path / "services.json"
+    config.write_bytes(b"[\xff")
+    assert load_service_config(config) == ([], ["service configuration unavailable"])
+
+
+def test_collect_services_normalizes_unexpected_multiline_state():
+    def runner(args, **kwargs):
+        return subprocess.CompletedProcess(args, 0, stdout="active\nsecret detail\n", stderr="")
+    services, errors = collect_services(
+        [{"name": "Rate", "unit": "unionpay-rate.service"}], runner=runner
+    )
+    assert services == [{"name": "Rate", "unit": "unionpay-rate.service", "state": "unknown", "status": "unavailable"}]
+    assert errors == ["service state unavailable: Rate"]
