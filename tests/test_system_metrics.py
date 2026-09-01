@@ -1,8 +1,17 @@
+from datetime import datetime
 from pathlib import Path
+from types import SimpleNamespace
+from zoneinfo import ZoneInfo
 import json
 import subprocess
 
-from system_metrics import classify, collect_temperatures, collect_services, load_service_config
+from system_metrics import (
+    classify,
+    collect_status,
+    collect_temperatures,
+    collect_services,
+    load_service_config,
+)
 
 
 def write_sensor(root: Path, hwmon: str, chip: str, index: int, label: str, value: int):
@@ -97,3 +106,125 @@ def test_collect_services_normalizes_unexpected_multiline_state():
     )
     assert services == [{"name": "Rate", "unit": "unionpay-rate.service", "state": "unknown", "status": "unavailable"}]
     assert errors == ["service state unavailable: Rate"]
+
+
+class FakePsutil:
+    @staticmethod
+    def cpu_percent(interval):
+        assert interval == 0.1
+        return 25.0
+
+    @staticmethod
+    def getloadavg():
+        return (0.1, 0.2, 0.3)
+
+    @staticmethod
+    def cpu_freq():
+        return SimpleNamespace(current=1800.0)
+
+    @staticmethod
+    def cpu_count(logical=True):
+        assert logical is True
+        return 4
+
+    @staticmethod
+    def virtual_memory():
+        return SimpleNamespace(total=16_000, used=4_000, percent=25.0)
+
+    @staticmethod
+    def swap_memory():
+        return SimpleNamespace(total=4_000, used=0, percent=0.0)
+
+    @staticmethod
+    def disk_usage(path):
+        assert path == "/"
+        return SimpleNamespace(total=100_000, used=20_000, percent=20.0)
+
+    @staticmethod
+    def boot_time():
+        return 1_700_000_000.0
+
+
+def test_collect_status_assembles_stable_public_shape(tmp_path):
+    os_release = tmp_path / "os-release"
+    os_release.write_text('PRETTY_NAME="Ubuntu 24.04.2 LTS"\n', encoding="utf-8")
+    services = tmp_path / "services.json"
+    services.write_text("[]", encoding="utf-8")
+    now = datetime(2026, 9, 1, 0, 0, tzinfo=ZoneInfo("Asia/Tokyo"))
+
+    payload = collect_status(
+        psutil_module=FakePsutil,
+        hwmon_root=tmp_path / "empty-hwmon",
+        os_release_path=os_release,
+        service_config_path=services,
+        now=now,
+        hostname="ubuntu-n5105",
+    )
+
+    assert payload["collected_at"] == "2026-09-01T00:00:00+09:00"
+    assert payload["overall_status"] == "ok"
+    assert payload["host"]["hostname"] == "ubuntu-n5105"
+    assert payload["host"]["os"] == "Ubuntu 24.04.2 LTS"
+    assert payload["cpu"] == {
+        "usage_percent": 25.0,
+        "status": "ok",
+        "load": {"1m": 0.1, "5m": 0.2, "15m": 0.3},
+        "frequency_mhz": 1800.0,
+        "logical_cpus": 4,
+    }
+    assert payload["memory"]["used_bytes"] == 4_000
+    assert payload["disk"]["usage_percent"] == 20.0
+    assert payload["services"] == []
+    assert payload["errors"] == []
+
+
+def status_with(psutil_module, tmp_path):
+    os_release = tmp_path / "os-release"
+    os_release.write_text('PRETTY_NAME="Ubuntu 24.04.2 LTS"\n', encoding="utf-8")
+    services = tmp_path / "services.json"
+    services.write_text("[]", encoding="utf-8")
+    return collect_status(
+        psutil_module=psutil_module,
+        hwmon_root=tmp_path / "empty-hwmon",
+        os_release_path=os_release,
+        service_config_path=services,
+        now=datetime(2026, 9, 1, 0, 0, tzinfo=ZoneInfo("Asia/Tokyo")),
+        hostname="ubuntu-n5105",
+    )
+
+
+def test_collect_status_keeps_other_metrics_when_memory_fails(tmp_path):
+    class MemoryFailingPsutil(FakePsutil):
+        @staticmethod
+        def virtual_memory():
+            raise OSError("private detail")
+
+    payload = status_with(MemoryFailingPsutil, tmp_path)
+
+    assert payload["memory"]["status"] == "unavailable"
+    assert payload["cpu"]["usage_percent"] == 25.0
+    assert payload["overall_status"] == "warning"
+    assert payload["errors"] == ["memory metrics unavailable"]
+
+
+def test_collect_status_is_critical_when_all_core_collectors_fail(tmp_path):
+    class CoreFailingPsutil(FakePsutil):
+        @staticmethod
+        def cpu_percent(interval):
+            raise OSError("private CPU detail")
+
+        @staticmethod
+        def virtual_memory():
+            raise OSError("private memory detail")
+
+        @staticmethod
+        def disk_usage(path):
+            raise OSError("private disk detail")
+
+    payload = status_with(CoreFailingPsutil, tmp_path)
+
+    assert payload["cpu"]["status"] == "unavailable"
+    assert payload["memory"]["status"] == "unavailable"
+    assert payload["disk"]["status"] == "unavailable"
+    assert payload["overall_status"] == "critical"
+    assert all("private" not in error for error in payload["errors"])

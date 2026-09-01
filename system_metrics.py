@@ -2,9 +2,14 @@ from __future__ import annotations
 
 import json
 import re
+import socket
 import subprocess
 from collections.abc import Callable
+from datetime import datetime
 from pathlib import Path
+from zoneinfo import ZoneInfo
+
+import psutil
 
 
 CPU_WARNING = 70.0
@@ -19,6 +24,7 @@ DISK_WARNING = 80.0
 DISK_CRITICAL = 90.0
 SERVICE_UNIT_PATTERN = re.compile(r"^[A-Za-z0-9_.@:-]+\.service$")
 SERVICE_STATES = {"active", "inactive", "failed", "activating", "deactivating", "unknown"}
+JST = ZoneInfo("Asia/Tokyo")
 
 
 def classify(value: float, warning: float, critical: float) -> str:
@@ -122,3 +128,119 @@ def collect_services(
             errors.append(f"service state unavailable: {target['name']}")
         services.append({**target, "state": state, "status": status})
     return services, errors
+
+
+def read_os_name(path: Path) -> str:
+    try:
+        for line in path.read_text(encoding="utf-8").splitlines():
+            if line.startswith("PRETTY_NAME="):
+                return line.split("=", 1)[1].strip().strip('"')
+    except OSError:
+        pass
+    return "Unavailable"
+
+
+def overall_status(items: list[dict], errors: list[str]) -> str:
+    statuses = {item.get("status") for item in items}
+    if "critical" in statuses:
+        return "critical"
+    if "warning" in statuses or "unavailable" in statuses or errors:
+        return "warning"
+    return "ok"
+
+
+def collect_status(
+    *,
+    psutil_module=psutil,
+    hwmon_root: Path = Path("/sys/class/hwmon"),
+    os_release_path: Path = Path("/etc/os-release"),
+    service_config_path: Path = Path(__file__).parent / "config" / "services.json",
+    runner: Callable = subprocess.run,
+    now: datetime | None = None,
+    hostname: str | None = None,
+) -> dict:
+    collected_at = now or datetime.now(JST)
+    errors: list[str] = []
+
+    try:
+        cpu_usage = round(float(psutil_module.cpu_percent(interval=0.1)), 1)
+        load_1, load_5, load_15 = psutil_module.getloadavg()
+        frequency = psutil_module.cpu_freq()
+        cpu = {
+            "usage_percent": cpu_usage,
+            "status": classify(cpu_usage, CPU_WARNING, CPU_CRITICAL),
+            "load": {"1m": round(load_1, 2), "5m": round(load_5, 2), "15m": round(load_15, 2)},
+            "frequency_mhz": round(float(frequency.current), 0) if frequency else None,
+            "logical_cpus": psutil_module.cpu_count(logical=True),
+        }
+    except (AttributeError, OSError, TypeError, ValueError):
+        cpu = {"usage_percent": None, "status": "unavailable", "load": None, "frequency_mhz": None, "logical_cpus": None}
+        errors.append("CPU metrics unavailable")
+
+    def usage_payload(values, warning, critical):
+        percent = round(float(values.percent), 1)
+        return {
+            "total_bytes": int(values.total),
+            "used_bytes": int(values.used),
+            "usage_percent": percent,
+            "status": classify(percent, warning, critical),
+        }
+
+    try:
+        memory = usage_payload(psutil_module.virtual_memory(), MEMORY_WARNING, MEMORY_CRITICAL)
+    except (AttributeError, OSError, TypeError, ValueError):
+        memory = {"total_bytes": None, "used_bytes": None, "usage_percent": None, "status": "unavailable"}
+        errors.append("memory metrics unavailable")
+
+    try:
+        swap_values = psutil_module.swap_memory()
+        swap = {
+            "total_bytes": int(swap_values.total),
+            "used_bytes": int(swap_values.used),
+            "usage_percent": round(float(swap_values.percent), 1),
+            "status": "ok",
+        }
+    except (AttributeError, OSError, TypeError, ValueError):
+        swap = {"total_bytes": None, "used_bytes": None, "usage_percent": None, "status": "unavailable"}
+        errors.append("swap metrics unavailable")
+
+    try:
+        disk = usage_payload(psutil_module.disk_usage("/"), DISK_WARNING, DISK_CRITICAL)
+    except (AttributeError, OSError, TypeError, ValueError):
+        disk = {"total_bytes": None, "used_bytes": None, "usage_percent": None, "status": "unavailable"}
+        errors.append("disk metrics unavailable")
+
+    try:
+        uptime_seconds = max(0, int(collected_at.timestamp() - psutil_module.boot_time()))
+    except (AttributeError, OSError, TypeError, ValueError):
+        uptime_seconds = None
+        errors.append("uptime unavailable")
+
+    temperatures, temperature_errors = collect_temperatures(hwmon_root)
+    targets, config_errors = load_service_config(service_config_path)
+    services, service_errors = collect_services(targets, runner=runner)
+    errors.extend(temperature_errors + config_errors + service_errors)
+
+    core_items = [cpu, memory, disk]
+    health_items = [*core_items, *temperatures, *services]
+    health = (
+        "critical"
+        if all(item["status"] == "unavailable" for item in core_items)
+        else overall_status(health_items, errors)
+    )
+    return {
+        "collected_at": collected_at.isoformat(timespec="seconds"),
+        "overall_status": health,
+        "host": {
+            "hostname": hostname or socket.gethostname(),
+            "os": read_os_name(os_release_path),
+            "uptime_seconds": uptime_seconds,
+        },
+        "cpu": cpu,
+        "temperatures": temperatures,
+        "memory": memory,
+        "swap": swap,
+        "disk": disk,
+        "services": services,
+        "errors": errors,
+    }
