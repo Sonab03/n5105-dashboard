@@ -14,6 +14,7 @@ from system_metrics import (
     collect_temperatures,
     collect_services,
     load_service_config,
+    read_power_sample,
 )
 
 
@@ -23,6 +24,95 @@ def write_sensor(root: Path, hwmon: str, chip: str, index: int, label: str, valu
     (sensor / "name").write_text(chip, encoding="utf-8")
     (sensor / f"temp{index}_label").write_text(label, encoding="utf-8")
     (sensor / f"temp{index}_input").write_text(str(value), encoding="utf-8")
+
+
+def write_power(path: Path, *, sampled_at="2026-08-31T15:00:00Z", watts=5.8):
+    path.write_text(
+        json.dumps({
+            "version": 1,
+            "source": "intel_rapl:package-0",
+            "package_watts": watts,
+            "sample_seconds": 5.0,
+            "sampled_at": sampled_at,
+        }),
+        encoding="utf-8",
+    )
+
+
+def test_read_power_sample_accepts_fresh_versioned_data(tmp_path):
+    path = tmp_path / "power.json"
+    write_power(path)
+
+    power, errors = read_power_sample(
+        path, now=datetime(2026, 8, 31, 15, 0, 10, tzinfo=timezone.utc)
+    )
+
+    assert power == {
+        "package_watts": 5.8,
+        "sample_seconds": 5.0,
+        "status": "ok",
+        "estimated": True,
+    }
+    assert errors == []
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        lambda data: data.update(version=2),
+        lambda data: data.update(source="core"),
+        lambda data: data.update(package_watts=-1),
+        lambda data: data.update(package_watts=True),
+        lambda data: data.update(package_watts=float("nan")),
+        lambda data: data.update(sample_seconds=0),
+        lambda data: data.update(sampled_at="not-a-time"),
+    ],
+)
+def test_read_power_sample_rejects_invalid_contract_without_leaking_details(tmp_path, mutate):
+    path = tmp_path / "power.json"
+    data = {
+        "version": 1,
+        "source": "intel_rapl:package-0",
+        "package_watts": 5.8,
+        "sample_seconds": 5.0,
+        "sampled_at": "2026-08-31T15:00:00Z",
+    }
+    mutate(data)
+    path.write_text(json.dumps(data), encoding="utf-8")
+
+    power, errors = read_power_sample(
+        path, now=datetime(2026, 8, 31, 15, 0, 10, tzinfo=timezone.utc)
+    )
+
+    assert power == {
+        "package_watts": None,
+        "sample_seconds": None,
+        "status": "unavailable",
+        "estimated": True,
+    }
+    assert errors == ["CPU package power unavailable"]
+    assert str(tmp_path) not in " ".join(errors)
+
+
+@pytest.mark.parametrize(
+    "sampled_at",
+    ["2026-08-31T14:59:44Z", "2026-08-31T15:00:06Z"],
+)
+def test_read_power_sample_rejects_stale_or_future_data(tmp_path, sampled_at):
+    path = tmp_path / "power.json"
+    write_power(path, sampled_at=sampled_at)
+    power, errors = read_power_sample(
+        path, now=datetime(2026, 8, 31, 15, 0, tzinfo=timezone.utc)
+    )
+    assert power["status"] == "unavailable"
+    assert errors == ["CPU package power unavailable"]
+
+
+def test_read_power_sample_handles_missing_and_malformed_files(tmp_path):
+    path = tmp_path / "power.json"
+    assert read_power_sample(path)[0]["status"] == "unavailable"
+    path.write_text("not-json", encoding="utf-8")
+    assert read_power_sample(path)[1] == ["CPU package power unavailable"]
 
 
 def test_classify_uses_inclusive_warning_and_critical_boundaries():
@@ -200,6 +290,8 @@ def test_collect_status_assembles_stable_public_shape(tmp_path):
     services = tmp_path / "services.json"
     services.write_text("[]", encoding="utf-8")
     now = datetime(2026, 9, 1, 0, 0, tzinfo=ZoneInfo("Asia/Tokyo"))
+    power_path = tmp_path / "power.json"
+    write_power(power_path)
 
     payload = collect_status(
         psutil_module=FakePsutil,
@@ -208,11 +300,12 @@ def test_collect_status_assembles_stable_public_shape(tmp_path):
         service_config_path=services,
         now=now,
         hostname="ubuntu-n5105",
+        power_path=power_path,
     )
 
     assert set(payload) == {
         "collected_at", "overall_status", "host", "cpu", "temperatures",
-        "memory", "swap", "disk", "services", "errors",
+        "memory", "swap", "disk", "services", "power", "errors",
     }
     assert set(payload["host"]) == {"hostname", "os", "uptime_seconds"}
     assert set(payload["cpu"]) == {
@@ -241,6 +334,7 @@ def test_collect_status_assembles_stable_public_shape(tmp_path):
     assert payload["memory"]["used_bytes"] == 4_000
     assert payload["disk"]["usage_percent"] == 20.0
     assert payload["services"] == []
+    assert payload["power"]["package_watts"] == 5.8
     assert payload["errors"] == []
 
 
@@ -249,6 +343,8 @@ def status_with(psutil_module, tmp_path, hwmon_root=None):
     os_release.write_text('PRETTY_NAME="Ubuntu 24.04.2 LTS"\n', encoding="utf-8")
     services = tmp_path / "services.json"
     services.write_text("[]", encoding="utf-8")
+    power_path = tmp_path / "power.json"
+    write_power(power_path)
     return collect_status(
         psutil_module=psutil_module,
         hwmon_root=hwmon_root or tmp_path / "empty-hwmon",
@@ -256,7 +352,26 @@ def status_with(psutil_module, tmp_path, hwmon_root=None):
         service_config_path=services,
         now=datetime(2026, 9, 1, 0, 0, tzinfo=ZoneInfo("Asia/Tokyo")),
         hostname="ubuntu-n5105",
+        power_path=power_path,
     )
+
+
+def test_collect_status_keeps_health_ok_when_power_is_missing(tmp_path):
+    os_release = tmp_path / "os-release"
+    os_release.write_text('PRETTY_NAME="Ubuntu 24.04.2 LTS"\n', encoding="utf-8")
+    payload = collect_status(
+        psutil_module=FakePsutil,
+        hwmon_root=tmp_path / "empty-hwmon",
+        os_release_path=os_release,
+        service_targets=[],
+        service_config_errors=[],
+        power_path=tmp_path / "missing-power.json",
+        now=datetime(2026, 9, 1, 0, 0, tzinfo=ZoneInfo("Asia/Tokyo")),
+        hostname="ubuntu-n5105",
+    )
+    assert payload["power"]["status"] == "unavailable"
+    assert payload["overall_status"] == "ok"
+    assert payload["errors"] == ["CPU package power unavailable"]
 
 
 @pytest.mark.parametrize(
@@ -420,6 +535,8 @@ def test_collect_status_strictly_encodes_non_finite_temperature_as_unavailable(t
     os_release.write_text('PRETTY_NAME="Ubuntu 24.04.2 LTS"\n', encoding="utf-8")
     services = tmp_path / "services.json"
     services.write_text("[]", encoding="utf-8")
+    power_path = tmp_path / "power.json"
+    write_power(power_path)
 
     payload = collect_status(
         psutil_module=FakePsutil,
@@ -428,6 +545,7 @@ def test_collect_status_strictly_encodes_non_finite_temperature_as_unavailable(t
         service_config_path=services,
         now=datetime(2026, 9, 1, 0, 0, tzinfo=ZoneInfo("Asia/Tokyo")),
         hostname="ubuntu-n5105",
+        power_path=power_path,
     )
 
     assert payload["temperatures"] == [
@@ -512,6 +630,8 @@ def test_collect_status_isolates_invalid_os_release_encoding(tmp_path):
     os_release.write_bytes(b"PRETTY_NAME=\xff")
     services = tmp_path / "services.json"
     services.write_text("[]", encoding="utf-8")
+    power_path = tmp_path / "power.json"
+    write_power(power_path)
 
     payload = collect_status(
         psutil_module=FakePsutil,
@@ -520,6 +640,7 @@ def test_collect_status_isolates_invalid_os_release_encoding(tmp_path):
         service_config_path=services,
         now=datetime(2026, 9, 1, 0, 0, tzinfo=ZoneInfo("Asia/Tokyo")),
         hostname="ubuntu-n5105",
+        power_path=power_path,
     )
 
     assert payload["host"] == {

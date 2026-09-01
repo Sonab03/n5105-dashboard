@@ -6,7 +6,7 @@ import re
 import socket
 import subprocess
 from collections.abc import Callable
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -26,6 +26,67 @@ DISK_CRITICAL = 90.0
 SERVICE_UNIT_PATTERN = re.compile(r"^[A-Za-z0-9_.@:-]+\.service$")
 SERVICE_STATES = {"active", "inactive", "failed", "activating", "deactivating", "unknown"}
 JST = ZoneInfo("Asia/Tokyo")
+POWER_SAMPLE_PATH = Path("/run/n5105-dashboard/power.json")
+POWER_ERROR = "CPU package power unavailable"
+
+
+def unavailable_power() -> dict:
+    return {
+        "package_watts": None,
+        "sample_seconds": None,
+        "status": "unavailable",
+        "estimated": True,
+    }
+
+
+def read_power_sample(
+    path: Path = POWER_SAMPLE_PATH,
+    now: datetime | None = None,
+) -> tuple[dict, list[str]]:
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(raw, dict):
+            raise ValueError("invalid power sample")
+        version = raw.get("version")
+        if isinstance(version, bool) or version != 1:
+            raise ValueError("invalid power sample version")
+        if raw.get("source") != "intel_rapl:package-0":
+            raise ValueError("invalid power source")
+        watts_raw = raw.get("package_watts")
+        seconds_raw = raw.get("sample_seconds")
+        if isinstance(watts_raw, bool) or isinstance(seconds_raw, bool):
+            raise ValueError("invalid power values")
+        watts = finite_float(watts_raw)
+        seconds = finite_float(seconds_raw)
+        if watts < 0 or seconds <= 0:
+            raise ValueError("invalid power values")
+        timestamp_raw = raw.get("sampled_at")
+        if not isinstance(timestamp_raw, str) or not timestamp_raw.endswith("Z"):
+            raise ValueError("invalid sample timestamp")
+        sampled_at = datetime.fromisoformat(timestamp_raw[:-1] + "+00:00")
+        current = now or datetime.now(timezone.utc)
+        if current.tzinfo is None:
+            current = current.replace(tzinfo=timezone.utc)
+        age_seconds = (
+            current.astimezone(timezone.utc) - sampled_at.astimezone(timezone.utc)
+        ).total_seconds()
+        if age_seconds > 15 or age_seconds < -5:
+            raise ValueError("power sample outside freshness window")
+        return {
+            "package_watts": watts,
+            "sample_seconds": seconds,
+            "status": "ok",
+            "estimated": True,
+        }, []
+    except (
+        OSError,
+        UnicodeError,
+        json.JSONDecodeError,
+        TypeError,
+        ValueError,
+        OverflowError,
+    ):
+        return unavailable_power(), [POWER_ERROR]
 
 
 def classify(value: float, warning: float, critical: float) -> str:
@@ -176,6 +237,7 @@ def collect_status(
     runner: Callable = subprocess.run,
     now: datetime | None = None,
     hostname: str | None = None,
+    power_path: Path = POWER_SAMPLE_PATH,
 ) -> dict:
     if now is None:
         collected_at = datetime.now(JST)
@@ -286,6 +348,10 @@ def collect_status(
     if os_name == "Unavailable":
         errors.append("host OS unavailable")
 
+    power, power_errors = read_power_sample(power_path, now=collected_at)
+    errors.extend(power_errors)
+    informational_errors.extend(power_errors)
+
     core_items = [cpu, memory, disk]
     health_items = [*core_items, *temperatures, *services]
     health = (
@@ -315,5 +381,6 @@ def collect_status(
         "swap": swap,
         "disk": disk,
         "services": services,
+        "power": power,
         "errors": errors,
     }
