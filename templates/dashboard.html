@@ -1,5 +1,116 @@
 <!doctype html>
 <html lang="zh-CN">
-<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>N5105 Dashboard</title></head>
-<body><main><h1>N5105 Dashboard</h1><p id="connection">正在加载状态…</p></main></body>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>N5105 Dashboard</title>
+  <style>
+    :root { color-scheme:dark; --bg:#080b10; --card:#111722; --line:#263042; --text:#eef3fb; --muted:#91a0b5; --ok:#35d07f; --warning:#f3bd43; --critical:#ff5d68; --unavailable:#778398; }
+    * { box-sizing:border-box; }
+    body { margin:0; min-height:100vh; background:radial-gradient(circle at top,#162033 0,#080b10 42%); color:var(--text); font:15px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; }
+    main { width:min(1120px,calc(100% - 32px)); margin:0 auto; padding:32px 0 56px; }
+    header { display:flex; align-items:flex-start; justify-content:space-between; gap:20px; margin-bottom:20px; }
+    h1 { margin:0; font-size:clamp(28px,5vw,46px); letter-spacing:-.04em; }
+    h2 { margin:0 0 14px; font-size:17px; }
+    p { margin:4px 0; color:var(--muted); }
+    .grid { display:grid; grid-template-columns:repeat(12,1fr); gap:14px; }
+    .card { grid-column:span 4; padding:18px; border:1px solid var(--line); border-radius:18px; background:rgba(17,23,34,.92); box-shadow:0 18px 50px rgba(0,0,0,.24); }
+    .wide { grid-column:span 6; }
+    .metric { display:flex; justify-content:space-between; gap:16px; padding:9px 0; border-top:1px solid rgba(38,48,66,.65); }
+    .metric:first-child { border-top:0; }
+    .value { color:var(--text); font-variant-numeric:tabular-nums; text-align:right; }
+    .badge { display:inline-flex; align-items:center; gap:7px; padding:6px 10px; border-radius:999px; background:#1a2330; color:var(--muted); font-size:13px; }
+    .dot { width:8px; height:8px; border-radius:50%; background:var(--unavailable); }
+    .ok .dot,.dot.ok { background:var(--ok); } .warning .dot,.dot.warning { background:var(--warning); } .critical .dot,.dot.critical { background:var(--critical); }
+    .bar { height:8px; margin-top:10px; overflow:hidden; border-radius:999px; background:#202a39; }
+    .bar > span { display:block; height:100%; border-radius:inherit; background:var(--ok); }
+    .bar > span.warning { background:var(--warning); } .bar > span.critical { background:var(--critical); } .bar > span.unavailable { background:var(--unavailable); }
+    #connection.failed { color:var(--critical); }
+    #errors { max-width:42rem; color:var(--warning); }
+    @media (max-width:760px) { header { display:block; } .card,.wide { grid-column:1/-1; } main { width:min(100% - 22px,1120px); padding-top:22px; } }
+  </style>
+</head>
+<body>
+  <main>
+    <header>
+      <div>
+        <h1>N5105 Dashboard</h1>
+        <p id="summary" aria-live="polite">正在读取主机状态</p>
+        <p id="errors" aria-live="polite" hidden></p>
+      </div>
+      <div>
+        <span class="badge" id="connection" aria-live="polite"><span class="dot"></span><span>连接中</span></span>
+        <p id="updated" aria-live="polite"></p>
+      </div>
+    </header>
+    <section class="grid">
+      <article class="card wide"><h2>CPU</h2><div id="cpu"></div></article>
+      <article class="card wide"><h2>温度</h2><div id="temperatures"></div></article>
+      <article class="card"><h2>内存与 Swap</h2><div id="memory"></div></article>
+      <article class="card"><h2>磁盘</h2><div id="disk"></div></article>
+      <article class="card"><h2>服务</h2><div id="services"></div></article>
+    </section>
+  </main>
+  <script>
+    let previousData = null;
+    const byId = id => document.getElementById(id);
+    const statuses = new Set(["ok", "warning", "critical", "unavailable"]);
+    const safeStatus = status => statuses.has(status) ? status : "unavailable";
+    const available = item => item === null || item === undefined ? "不可用" : String(item);
+    const value = (number, suffix = "") => number === null || number === undefined ? "不可用" : `${number}${suffix}`;
+    const bytes = number => number === null || number === undefined || !Number.isFinite(Number(number)) ? "不可用" : `${(Number(number) / 1073741824).toFixed(1)} GiB`;
+    const uptime = seconds => seconds === null || seconds === undefined || !Number.isFinite(Number(seconds)) ? "不可用" : `${Math.floor(Number(seconds) / 86400)}天 ${Math.floor((Number(seconds) % 86400) / 3600)}小时`;
+
+    function removeChildren(element) { while (element.firstChild) element.removeChild(element.firstChild); }
+    function metric(label, content, status) {
+      const row = document.createElement("div"); row.className = "metric";
+      const name = document.createElement("span"); name.textContent = label;
+      const display = document.createElement("span"); display.className = `value ${safeStatus(status)}`; display.textContent = content;
+      row.append(name, display); return row;
+    }
+    function usageBar(percent, status) {
+      const bar = document.createElement("div"); bar.className = "bar";
+      const fill = document.createElement("span"); const number = Number(percent);
+      fill.className = safeStatus(status); fill.style.width = `${Number.isFinite(number) ? Math.max(0, Math.min(number, 100)) : 0}%`;
+      bar.append(fill); return bar;
+    }
+    function addUsage(container, label, item) {
+      const data = item || {}; container.append(metric(label, value(data.usage_percent, "%"), data.status)); container.append(usageBar(data.usage_percent, data.status));
+    }
+    function renderConnection(status) {
+      const connection = byId("connection"); connection.className = `badge ${safeStatus(status)}`;
+      connection.lastElementChild.textContent = status === "ok" ? "运行正常" : status === "warning" ? "需要关注" : "存在异常";
+    }
+    function render(data) {
+      if (!data || typeof data !== "object" || !data.host || !data.cpu) throw new Error("invalid status payload");
+      previousData = data;
+      const host = data.host || {}, cpu = data.cpu || {}, memory = data.memory || {}, swap = data.swap || {}, disk = data.disk || {};
+      const temperatures = Array.isArray(data.temperatures) ? data.temperatures : [], services = Array.isArray(data.services) ? data.services : [], errors = Array.isArray(data.errors) ? data.errors : [];
+      byId("summary").textContent = `${available(host.hostname)} · ${available(host.os)} · 已运行 ${uptime(host.uptime_seconds)}`;
+      byId("updated").textContent = `更新：${new Date(data.collected_at).toLocaleString()}`;
+      byId("errors").hidden = errors.length === 0; byId("errors").textContent = errors.length ? `部分指标不可用：${errors.join("；")}` : "";
+      renderConnection(data.overall_status);
+      const cpuCard = byId("cpu"); removeChildren(cpuCard); addUsage(cpuCard, "使用率", cpu);
+      const load = cpu.load; cpuCard.append(metric("负载 1/5/15m", load ? `${available(load["1m"])} / ${available(load["5m"])} / ${available(load["15m"])}` : "不可用")); cpuCard.append(metric("频率", value(cpu.frequency_mhz, " MHz"))); cpuCard.append(metric("逻辑核心", available(cpu.logical_cpus)));
+      const temperatureCard = byId("temperatures"); removeChildren(temperatureCard);
+      if (temperatures.length) temperatures.forEach(item => temperatureCard.append(metric(available(item.name), value(item.celsius, "°C"), item.status))); else temperatureCard.append(metric("传感器", "不可用", "unavailable"));
+      const memoryCard = byId("memory"); removeChildren(memoryCard); memoryCard.append(metric("内存", `${bytes(memory.used_bytes)} / ${bytes(memory.total_bytes)}`, memory.status)); addUsage(memoryCard, "内存使用率", memory); memoryCard.append(metric("Swap", `${bytes(swap.used_bytes)} / ${bytes(swap.total_bytes)}`, swap.status)); addUsage(memoryCard, "Swap 使用率", swap);
+      const diskCard = byId("disk"); removeChildren(diskCard); diskCard.append(metric("根分区", `${bytes(disk.used_bytes)} / ${bytes(disk.total_bytes)}`, disk.status)); addUsage(diskCard, "使用率", disk);
+      const serviceCard = byId("services"); removeChildren(serviceCard);
+      if (services.length) services.forEach(item => serviceCard.append(metric(available(item.name), available(item.state), item.status))); else serviceCard.append(metric("服务", "未配置", "unavailable"));
+    }
+    async function refresh() {
+      try {
+        const response = await fetch("/api/status", {cache: "no-store"});
+        if (!response.ok) throw new Error("status request failed"); render(await response.json());
+      } catch (error) {
+        const connection = byId("connection"); connection.className = "badge failed"; connection.lastElementChild.textContent = "连接中断";
+        byId("updated").textContent = `刷新失败：${new Date().toLocaleString()} · 10秒后重试`;
+        if (!previousData) byId("summary").textContent = "暂时无法读取主机状态";
+      }
+    }
+    refresh();
+    setInterval(refresh, 10000);
+  </script>
+</body>
 </html>

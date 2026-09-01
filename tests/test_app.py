@@ -26,6 +26,14 @@ def test_dashboard_route_returns_html():
     assert response.status_code == 200
     assert response.headers["content-type"].startswith("text/html")
     assert "N5105 Dashboard" in response.text
+    for element_id in ("summary", "cpu", "temperatures", "memory", "disk", "services", "connection", "updated"):
+        assert f'id="{element_id}"' in response.text
+    assert "setInterval(refresh, 10000)" in response.text
+    assert 'fetch("/api/status", {cache: "no-store"})' in response.text
+    assert "previousData" in response.text
+    assert "textContent" in response.text
+    assert "innerHTML" not in response.text
+    assert 'aria-live="polite"' in response.text
 
 
 def test_status_route_returns_provider_payload_without_cache():
