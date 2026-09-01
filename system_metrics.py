@@ -118,8 +118,12 @@ def collect_services(
                 ["systemctl", "is-active", "--", target["unit"]],
                 capture_output=True, text=True, timeout=2, shell=False, check=False,
             )
-            state = result.stdout.strip() or "unknown"
-            if state not in SERVICE_STATES:
+            state = result.stdout.strip()
+            if (
+                not state
+                or state not in SERVICE_STATES
+                or (state == "active" and result.returncode != 0)
+            ):
                 state, status = "unknown", "unavailable"
                 errors.append(f"service state unavailable: {target['name']}")
             else:
@@ -167,6 +171,8 @@ def collect_status(
     hwmon_root: Path = Path("/sys/class/hwmon"),
     os_release_path: Path = Path("/etc/os-release"),
     service_config_path: Path = Path(__file__).parent / "config" / "services.json",
+    service_targets: list[dict] | None = None,
+    service_config_errors: list[str] | None = None,
     runner: Callable = subprocess.run,
     now: datetime | None = None,
     hostname: str | None = None,
@@ -178,25 +184,55 @@ def collect_status(
     else:
         collected_at = now.astimezone(JST)
     errors: list[str] = []
+    informational_errors: list[str] = []
 
     try:
         cpu_usage = round(finite_float(psutil_module.cpu_percent(interval=0.1)), 1)
-        load_1, load_5, load_15 = psutil_module.getloadavg()
-        frequency = psutil_module.cpu_freq()
         cpu = {
             "usage_percent": cpu_usage,
             "status": classify(cpu_usage, CPU_WARNING, CPU_CRITICAL),
-            "load": {
-                "1m": round(finite_float(load_1), 2),
-                "5m": round(finite_float(load_5), 2),
-                "15m": round(finite_float(load_15), 2),
-            },
-            "frequency_mhz": round(finite_float(frequency.current), 0) if frequency else None,
-            "logical_cpus": finite_int(psutil_module.cpu_count(logical=True)),
+            "load": None,
+            "frequency_mhz": None,
+            "logical_cpus": None,
         }
     except (AttributeError, OSError, TypeError, ValueError):
-        cpu = {"usage_percent": None, "status": "unavailable", "load": None, "frequency_mhz": None, "logical_cpus": None}
-        errors.append("CPU metrics unavailable")
+        cpu = {
+            "usage_percent": None,
+            "status": "unavailable",
+            "load": None,
+            "frequency_mhz": None,
+            "logical_cpus": None,
+        }
+        errors.append("CPU utilization unavailable")
+
+    try:
+        load_1, load_5, load_15 = psutil_module.getloadavg()
+        cpu["load"] = {
+            "1m": round(finite_float(load_1), 2),
+            "5m": round(finite_float(load_5), 2),
+            "15m": round(finite_float(load_15), 2),
+        }
+    except (AttributeError, OSError, TypeError, ValueError):
+        error = "CPU load averages unavailable"
+        errors.append(error)
+        informational_errors.append(error)
+
+    try:
+        frequency = psutil_module.cpu_freq()
+        cpu["frequency_mhz"] = (
+            round(finite_float(frequency.current), 0) if frequency else None
+        )
+    except (AttributeError, OSError, TypeError, ValueError):
+        error = "CPU frequency unavailable"
+        errors.append(error)
+        informational_errors.append(error)
+
+    try:
+        cpu["logical_cpus"] = finite_int(psutil_module.cpu_count(logical=True))
+    except (AttributeError, OSError, TypeError, ValueError):
+        error = "logical CPU count unavailable"
+        errors.append(error)
+        informational_errors.append(error)
 
     def usage_payload(values, warning, critical):
         percent = round(finite_float(values.percent), 1)
@@ -238,7 +274,11 @@ def collect_status(
         errors.append("uptime unavailable")
 
     temperatures, temperature_errors = collect_temperatures(hwmon_root)
-    targets, config_errors = load_service_config(service_config_path)
+    if service_targets is None:
+        targets, config_errors = load_service_config(service_config_path)
+    else:
+        targets = service_targets
+        config_errors = list(service_config_errors or [])
     services, service_errors = collect_services(targets, runner=runner)
     errors.extend(temperature_errors + config_errors + service_errors)
 
@@ -253,7 +293,12 @@ def collect_status(
         if all(item["status"] == "unavailable" for item in core_items)
         else overall_status(
             health_items,
-            [error for error in errors if error != "swap metrics unavailable"],
+            [
+                error
+                for error in errors
+                if error != "swap metrics unavailable"
+                and error not in informational_errors
+            ],
         )
     )
     return {

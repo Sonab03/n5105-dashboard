@@ -1,3 +1,5 @@
+import json
+
 from fastapi.testclient import TestClient
 
 from app import create_app
@@ -25,6 +27,7 @@ def test_dashboard_route_returns_html():
     response = make_client().get("/")
     assert response.status_code == 200
     assert response.headers["content-type"].startswith("text/html")
+    assert response.headers["cache-control"] == "no-store"
     assert "N5105 Dashboard" in response.text
     for element_id in ("summary", "cpu", "temperatures", "memory", "disk", "services", "connection", "updated"):
         assert f'id="{element_id}"' in response.text
@@ -60,3 +63,78 @@ def test_health_route_checks_only_dashboard_liveness():
     response = make_client().get("/healthz")
     assert response.status_code == 200
     assert response.json() == {"status": "ok"}
+    assert response.headers["cache-control"] == "no-store"
+
+
+def test_default_status_provider_keeps_service_targets_until_application_restart(tmp_path):
+    config = tmp_path / "services.json"
+    config.write_text(
+        json.dumps([{"name": "Initial", "unit": "initial.service"}]),
+        encoding="utf-8",
+    )
+
+    def echo_config(*, service_targets, service_config_errors):
+        return {"services": service_targets, "errors": service_config_errors}
+
+    client = TestClient(
+        create_app(
+            service_config_path=config,
+            status_collector=echo_config,
+        )
+    )
+    config.write_text(
+        json.dumps([{"name": "Edited", "unit": "edited.service"}]),
+        encoding="utf-8",
+    )
+
+    assert client.get("/api/status").json() == {
+        "services": [{"name": "Initial", "unit": "initial.service"}],
+        "errors": [],
+    }
+    assert client.get("/api/status").json() == {
+        "services": [{"name": "Initial", "unit": "initial.service"}],
+        "errors": [],
+    }
+
+    restarted_client = TestClient(
+        create_app(
+            service_config_path=config,
+            status_collector=echo_config,
+        )
+    )
+    assert restarted_client.get("/api/status").json() == {
+        "services": [{"name": "Edited", "unit": "edited.service"}],
+        "errors": [],
+    }
+
+
+def test_default_status_provider_keeps_startup_config_error_until_restart(tmp_path):
+    config = tmp_path / "services.json"
+    config.write_text("not-json", encoding="utf-8")
+
+    def echo_config(*, service_targets, service_config_errors):
+        return {"services": service_targets, "errors": service_config_errors}
+
+    client = TestClient(
+        create_app(
+            service_config_path=config,
+            status_collector=echo_config,
+        )
+    )
+    config.write_text("[]", encoding="utf-8")
+
+    assert client.get("/api/status").json() == {
+        "services": [],
+        "errors": ["service configuration unavailable"],
+    }
+
+    restarted_client = TestClient(
+        create_app(
+            service_config_path=config,
+            status_collector=echo_config,
+        )
+    )
+    assert restarted_client.get("/api/status").json() == {
+        "services": [],
+        "errors": [],
+    }

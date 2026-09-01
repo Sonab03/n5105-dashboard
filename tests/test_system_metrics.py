@@ -6,6 +6,8 @@ from types import SimpleNamespace
 from zoneinfo import ZoneInfo
 import subprocess
 
+import pytest
+
 from system_metrics import (
     classify,
     collect_status,
@@ -108,6 +110,35 @@ def test_collect_services_sanitizes_query_failure():
     assert services[0]["state"] == "unknown"
     assert services[0]["status"] == "unavailable"
     assert errors == ["service state unavailable: Rate"]
+
+
+@pytest.mark.parametrize(
+    ("returncode", "stdout"),
+    [
+        (0, ""),
+        (1, "active\n"),
+    ],
+)
+def test_collect_services_marks_unsuccessful_completed_query_unavailable(returncode, stdout):
+    def runner(args, **kwargs):
+        return subprocess.CompletedProcess(
+            args, returncode, stdout=stdout, stderr="private local detail"
+        )
+
+    services, errors = collect_services(
+        [{"name": "Rate", "unit": "unionpay-rate.service"}], runner=runner
+    )
+
+    assert services == [
+        {
+            "name": "Rate",
+            "unit": "unionpay-rate.service",
+            "state": "unknown",
+            "status": "unavailable",
+        }
+    ]
+    assert errors == ["service state unavailable: Rate"]
+    assert "private" not in " ".join(errors)
 
 
 def test_load_service_config_rejects_invalid_utf8(tmp_path):
@@ -213,19 +244,149 @@ def test_collect_status_assembles_stable_public_shape(tmp_path):
     assert payload["errors"] == []
 
 
-def status_with(psutil_module, tmp_path):
+def status_with(psutil_module, tmp_path, hwmon_root=None):
     os_release = tmp_path / "os-release"
     os_release.write_text('PRETTY_NAME="Ubuntu 24.04.2 LTS"\n', encoding="utf-8")
     services = tmp_path / "services.json"
     services.write_text("[]", encoding="utf-8")
     return collect_status(
         psutil_module=psutil_module,
-        hwmon_root=tmp_path / "empty-hwmon",
+        hwmon_root=hwmon_root or tmp_path / "empty-hwmon",
         os_release_path=os_release,
         service_config_path=services,
         now=datetime(2026, 9, 1, 0, 0, tzinfo=ZoneInfo("Asia/Tokyo")),
         hostname="ubuntu-n5105",
     )
+
+
+@pytest.mark.parametrize(
+    ("method_name", "field_name", "error"),
+    [
+        ("getloadavg", "load", "CPU load averages unavailable"),
+        ("cpu_freq", "frequency_mhz", "CPU frequency unavailable"),
+        ("cpu_count", "logical_cpus", "logical CPU count unavailable"),
+    ],
+)
+def test_collect_status_preserves_cpu_utilization_when_informational_probe_fails(
+    tmp_path, monkeypatch, method_name, field_name, error
+):
+    def fail(*args, **kwargs):
+        raise OSError("private CPU detail")
+
+    monkeypatch.setattr(FakePsutil, method_name, staticmethod(fail))
+
+    payload = status_with(FakePsutil, tmp_path)
+
+    assert payload["cpu"]["usage_percent"] == 25.0
+    assert payload["cpu"]["status"] == "ok"
+    assert payload["cpu"][field_name] is None
+    assert payload["overall_status"] == "ok"
+    assert payload["errors"] == [error]
+    assert "private" not in " ".join(payload["errors"])
+
+
+def test_collect_status_preserves_cpu_information_when_utilization_fails(tmp_path):
+    class CpuUtilizationFailingPsutil(FakePsutil):
+        @staticmethod
+        def cpu_percent(interval):
+            raise OSError("private CPU detail")
+
+    payload = status_with(CpuUtilizationFailingPsutil, tmp_path)
+
+    assert payload["cpu"] == {
+        "usage_percent": None,
+        "status": "unavailable",
+        "load": {"1m": 0.1, "5m": 0.2, "15m": 0.3},
+        "frequency_mhz": 1800.0,
+        "logical_cpus": 4,
+    }
+    assert payload["overall_status"] == "warning"
+    assert payload["errors"] == ["CPU utilization unavailable"]
+
+
+@pytest.mark.parametrize(
+    ("metric", "value", "expected_status"),
+    [
+        ("cpu", 70.0, "warning"),
+        ("cpu", 90.0, "critical"),
+        ("memory", 80.0, "warning"),
+        ("memory", 90.0, "critical"),
+        ("disk", 80.0, "warning"),
+        ("disk", 90.0, "critical"),
+        ("cpu_temperature", 70.0, "warning"),
+        ("cpu_temperature", 85.0, "critical"),
+        ("nvme_temperature", 60.0, "warning"),
+        ("nvme_temperature", 75.0, "critical"),
+    ],
+)
+def test_collect_status_applies_metric_thresholds_to_assembled_payload(
+    tmp_path, monkeypatch, metric, value, expected_status
+):
+    hwmon_root = tmp_path / "hwmon"
+    if metric == "cpu":
+        monkeypatch.setattr(
+            FakePsutil, "cpu_percent", staticmethod(lambda interval: value)
+        )
+    elif metric == "memory":
+        monkeypatch.setattr(
+            FakePsutil,
+            "virtual_memory",
+            staticmethod(
+                lambda: SimpleNamespace(total=16_000, used=12_000, percent=value)
+            ),
+        )
+    elif metric == "disk":
+        monkeypatch.setattr(
+            FakePsutil,
+            "disk_usage",
+            staticmethod(
+                lambda path: SimpleNamespace(total=100_000, used=80_000, percent=value)
+            ),
+        )
+    elif metric == "cpu_temperature":
+        write_sensor(
+            hwmon_root, "hwmon0", "coretemp", 1, "Package id 0", int(value * 1000)
+        )
+    else:
+        write_sensor(
+            hwmon_root, "hwmon0", "nvme", 1, "Composite", int(value * 1000)
+        )
+
+    payload = status_with(FakePsutil, tmp_path, hwmon_root=hwmon_root)
+
+    if metric == "cpu":
+        actual_status = payload["cpu"]["status"]
+    elif metric in {"memory", "disk"}:
+        actual_status = payload[metric]["status"]
+    else:
+        actual_status = payload["temperatures"][0]["status"]
+    assert actual_status == expected_status
+    assert payload["overall_status"] == expected_status
+
+
+@pytest.mark.parametrize("critical_metric", ["memory", "nvme_temperature"])
+def test_collect_status_gives_critical_precedence_over_warning(
+    tmp_path, monkeypatch, critical_metric
+):
+    monkeypatch.setattr(
+        FakePsutil, "cpu_percent", staticmethod(lambda interval: 70.0)
+    )
+    hwmon_root = tmp_path / "hwmon"
+    if critical_metric == "memory":
+        monkeypatch.setattr(
+            FakePsutil,
+            "virtual_memory",
+            staticmethod(
+                lambda: SimpleNamespace(total=16_000, used=15_000, percent=90.0)
+            ),
+        )
+    else:
+        write_sensor(hwmon_root, "hwmon0", "nvme", 1, "Composite", 75_000)
+
+    payload = status_with(FakePsutil, tmp_path, hwmon_root=hwmon_root)
+
+    assert payload["cpu"]["status"] == "warning"
+    assert payload["overall_status"] == "critical"
 
 
 def assert_only_finite_floats(value):
