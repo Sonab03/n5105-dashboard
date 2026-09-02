@@ -10,6 +10,7 @@ from system_metrics import collect_status, load_service_config
 
 BASE_DIR = Path(__file__).parent
 SERVICE_CONFIG_PATH = BASE_DIR / "config" / "services.json"
+APP_VERSION = "1.1.0"
 
 
 def create_app(
@@ -38,7 +39,7 @@ def create_app(
         return templates.TemplateResponse(
             request=request,
             name="dashboard.html",
-            context={},
+            context={"app_version": APP_VERSION},
             headers={"Cache-Control": "no-store"},
         )
 

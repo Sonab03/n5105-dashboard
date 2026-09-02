@@ -2,7 +2,7 @@ import json
 
 from fastapi.testclient import TestClient
 
-from app import create_app
+from app import APP_VERSION, create_app
 
 
 SAMPLE = {
@@ -30,6 +30,8 @@ def test_dashboard_route_returns_html():
     assert response.headers["content-type"].startswith("text/html")
     assert response.headers["cache-control"] == "no-store"
     assert "N5105 Dashboard" in response.text
+    assert APP_VERSION == "1.1.0"
+    assert 'id="app-version">v1.1.0<' in response.text
     for element_id in ("summary", "cpu", "temperatures", "memory", "disk", "services", "connection", "updated"):
         assert f'id="{element_id}"' in response.text
     assert "setInterval(refresh, 5000)" in response.text
@@ -56,6 +58,19 @@ def test_dashboard_route_returns_html():
     assert "temperatureCard.append(metric(available(item.name), value(item.celsius, \"°C\"), item.status))" in response.text
     assert "function serviceStatus(status, state)" in response.text
     assert 'serviceStatus(item.status, item.state)' in response.text
+
+
+def test_dashboard_supports_persistent_auto_light_and_dark_themes():
+    html = make_client().get("/").text
+
+    assert 'id="theme-toggle"' in html
+    assert 'aria-label="切换主题"' in html
+    assert 'localStorage.getItem("n5105-theme")' in html
+    assert 'localStorage.setItem("n5105-theme", preference)' in html
+    assert 'window.matchMedia("(prefers-color-scheme: light)")' in html
+    assert 'document.documentElement.dataset.theme = resolved' in html
+    assert '[data-theme="light"]' in html
+    assert 'const themeOrder = ["auto", "dark", "light"]' in html
 
 
 def test_status_route_returns_provider_payload_without_cache():
