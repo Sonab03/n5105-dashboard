@@ -10,7 +10,7 @@ from system_metrics import collect_status, load_service_config
 
 BASE_DIR = Path(__file__).parent
 SERVICE_CONFIG_PATH = BASE_DIR / "config" / "services.json"
-APP_VERSION = "1.1.0"
+APP_VERSION = "1.1.1"
 
 
 def create_app(

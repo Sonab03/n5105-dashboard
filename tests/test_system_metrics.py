@@ -177,6 +177,13 @@ def test_load_service_config_accepts_service_units_and_rejects_unsafe_values(tmp
     assert errors == ["invalid service configuration entry: Unsafe"]
 
 
+def test_deployed_service_config_includes_tailscale():
+    targets, errors = load_service_config(Path("config/services.json"))
+
+    assert errors == []
+    assert {"name": "Tailscale", "unit": "tailscaled.service"} in targets
+
+
 def test_collect_services_uses_argument_list_and_marks_inactive_critical():
     calls = []
     def runner(args, **kwargs):

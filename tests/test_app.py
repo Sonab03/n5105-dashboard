@@ -30,8 +30,8 @@ def test_dashboard_route_returns_html():
     assert response.headers["content-type"].startswith("text/html")
     assert response.headers["cache-control"] == "no-store"
     assert "N5105 Dashboard" in response.text
-    assert APP_VERSION == "1.1.0"
-    assert 'id="app-version">v1.1.0<' in response.text
+    assert APP_VERSION == "1.1.1"
+    assert 'id="app-version">v1.1.1<' in response.text
     for element_id in ("summary", "cpu", "temperatures", "memory", "disk", "services", "connection", "updated"):
         assert f'id="{element_id}"' in response.text
     assert "setInterval(refresh, 5000)" in response.text
