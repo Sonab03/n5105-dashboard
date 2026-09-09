@@ -1,7 +1,8 @@
 [
+  {"name": "MC-Server", "unit": "minecraft-server.service"},
+  {"name": "SakuraFrp", "unit": "natfrp.service"},
   {"name": "Sonab Home", "unit": "sonab-home.service"},
   {"name": "UnionPay Rate", "unit": "unionpay-rate.service"},
   {"name": "N5105 Dashboard", "unit": "n5105-dashboard.service"},
-  {"name": "Cloudflare Tunnel", "unit": "cloudflared.service"},
   {"name": "Tailscale", "unit": "tailscaled.service"}
 ]
